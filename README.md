@@ -35,3 +35,32 @@ wtedy `PaymentCompleted` emitujesz dopiero po webhooku.
 `SPRING_DATASOURCE_URL=.../payment_db`, `SPRING_KAFKA_BOOTSTRAP_SERVERS=shop-kafka:9092`,
 `SPRING_KAFKA_CONSUMER_GROUP_ID=shop-payment`, `PAYMENT_FAILURE_RATE=0.15`,
 `PAYMENT_LATENCY_MS=200`.
+
+## High Level Design (ogólny workflow)
+
+Mock PSP sterowany zdarzeniami: konsumuje `PaymentRequested`, symuluje rozliczenie
+(opóźnienie + wynik wg `PAYMENT_FAILURE_RATE`, plus deterministyczny hook: kwota
+`x.66` zawsze odrzucona), zapisuje wynik + zdarzenie do outboxa, publisher wypycha
+`PaymentCompleted/Failed`. Idempotentne po `idempotency_key`/`orderId`.
+
+```mermaid
+flowchart LR
+    PE[["payment-events"]] -->|"PaymentRequested"| PAY["shop-payment (mock PSP)"]
+    PAY --> DB[("Postgres payment_db: payments, outbox")]
+    OBX["Outbox publisher"] -->|"PaymentCompleted/Failed"| PE2[["payment-events"]]
+```
+
+## Low Level Design (diagram aktywności)
+
+```mermaid
+flowchart TD
+    A(["PaymentRequested"]) --> B{"idempotency_key przetworzony?"}
+    B -- tak --> C["zwróć poprzedni wynik"] --> Z(["ack"])
+    B -- nie --> D["czekaj PAYMENT_LATENCY_MS"]
+    D --> E{"odrzucić? (failure rate lub kwota x.66)"}
+    E -- nie --> F["(tx) payment COMPLETED + PaymentCompleted -> outbox"]
+    E -- tak --> G["(tx) payment FAILED + PaymentFailed -> outbox"]
+    F --> P["publisher emituje wynik"]
+    G --> P
+    P --> Z
+```
