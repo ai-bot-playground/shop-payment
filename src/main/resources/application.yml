@@ -1,6 +1,31 @@
 spring:
   application:
     name: shop-payment
+  jpa:
+    hibernate:
+      ddl-auto: none
+    open-in-view: false
+  flyway:
+    enabled: true
+  kafka:
+    consumer:
+      group-id: ${SPRING_KAFKA_CONSUMER_GROUP_ID:shop-payment}
+      auto-offset-reset: earliest
+      key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      value-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+    producer:
+      key-serializer: org.apache.kafka.common.serialization.StringSerializer
+      value-serializer: org.apache.kafka.common.serialization.StringSerializer
+
+shop:
+  payment:
+    payment-events-topic: payment-events
+    failure-rate: ${PAYMENT_FAILURE_RATE:0.15}
+    latency-ms: ${PAYMENT_LATENCY_MS:200}
+  outbox:
+    enabled: true
+    poll-ms: 1000
+
 management:
   endpoints:
     web:

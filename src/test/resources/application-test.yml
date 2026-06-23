@@ -1,0 +1,12 @@
+spring:
+  datasource:
+    url: jdbc:tc:postgresql:17-alpine:///paymentdb
+    driver-class-name: org.testcontainers.jdbc.ContainerDatabaseDriver
+  kafka:
+    listener:
+      auto-startup: false
+shop:
+  outbox:
+    enabled: false
+  payment:
+    latency-ms: 0
