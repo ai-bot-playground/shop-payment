@@ -1,66 +1,50 @@
 # shop-payment
 
-Przetwarza płatności. W demie to **mock** z konfigurowalnym odsetkiem odrzuceń —
-dzięki temu łatwo wywołać ścieżkę kompensacji. Interfejs jak do prawdziwego
-operatora (Stripe, PayU), żeby podmiana była łatwa. Standalone repo z własnym
-`Dockerfile` i kodem. Stack: Spring Boot + JPA (Postgres) + Spring Kafka.
+Mock PSP (Payment Service Provider) — mikrousługa przetwarzająca płatności w architekturze event-driven.  
+Stack: **Java 25 · Spring Boot 4.0.7 · Kafka · PostgreSQL · Flyway · Gradle 9.6**
 
-## Zdarzenia Kafki
+## Jak działa
 
-Konsumuje (grupa `shop-payment`): `PaymentRequested` (z `payment-events`).
-Publikuje (`payment-events`, klucz `orderId`): `PaymentCompleted` / `PaymentFailed`.
+Nasłuchuje na topiku `payment-events` zdarzeń `PaymentRequested`, symuluje rozliczenie i publikuje wynik z powrotem na ten sam topik.
 
-## Logika (do zaimplementowania)
-
-1. Odbierz `PaymentRequested`, sprawdź idempotencję po `idempotency_key`/`orderId`
-   (ta sama płatność **nie może** obciążyć klienta dwa razy przy retry).
-2. Zasymuluj rozliczenie: opóźnienie `PAYMENT_LATENCY_MS`, wynik losowany wg
-   `PAYMENT_FAILURE_RATE` (np. 0.15 = 15% odrzuceń).
-3. Zapis wyniku w `payments` + zdarzenie do `outbox` (jedna transakcja).
-4. Publisher wysyła `PaymentCompleted` / `PaymentFailed`.
-
-## Idempotencja
-`payments(order_id / idempotency_key UNIQUE, status, amount)`. Płatność dla
-istniejącego klucza → zwróć poprzedni wynik, nie przetwarzaj ponownie.
-
-## Refund (na przyszłość)
-Gdy w przepływie pojawi się krok po płatności, który może się nie powieść,
-shop-payment musi umieć wykonać **zwrot** jako własną akcję kompensującą.
-
-## Podmiana na realnego operatora
-Zastąp mock klientem PSP. Uwaga na webhooki (operator potwierdza asynchronicznie) —
-wtedy `PaymentCompleted` emitujesz dopiero po webhooku.
-
-## Konfiguracja (env)
-`SPRING_DATASOURCE_URL=.../payment_db`, `SPRING_KAFKA_BOOTSTRAP_SERVERS=shop-kafka:9092`,
-`SPRING_KAFKA_CONSUMER_GROUP_ID=shop-payment`, `PAYMENT_FAILURE_RATE=0.15`,
-`PAYMENT_LATENCY_MS=200`.
-
-## High Level Design (ogólny workflow)
-
-Mock PSP sterowany zdarzeniami: konsumuje `PaymentRequested`, symuluje rozliczenie
-(opóźnienie + wynik wg `PAYMENT_FAILURE_RATE`, plus deterministyczny hook: kwota
-`x.66` zawsze odrzucona), zapisuje wynik + zdarzenie do outboxa, publisher wypycha
-`PaymentCompleted/Failed`. Idempotentne po `idempotency_key`/`orderId`.
+- **15% losowych odrzuceń** (konfigurowalne przez `PAYMENT_FAILURE_RATE`)
+- **Deterministyczny hook dla testów:** kwota kończąca się na `.66` jest zawsze odrzucona
+- **Idempotentne po `orderId`:** to samo zamówienie nie zostanie obciążone dwa razy
+- **Outbox pattern:** wynik trafia najpierw do tabeli `outbox` w jednej transakcji z DB, a scheduler publikuje go do Kafka co 1 s
 
 ```mermaid
 flowchart LR
-    PE[["payment-events"]] -->|"PaymentRequested"| PAY["shop-payment (mock PSP)"]
-    PAY --> DB[("Postgres payment_db: payments, outbox")]
-    OBX["Outbox publisher"] -->|"PaymentCompleted/Failed"| PE2[["payment-events"]]
+    PE[["payment-events"]] -->|"PaymentRequested"| PAY["shop-payment"]
+    PAY --> DB[("PostgreSQL\npayments · outbox")]
+    DB -->|"co 1 s"| OBX["OutboxPublisher"]
+    OBX -->|"PaymentCompleted / PaymentFailed"| PE
 ```
 
-## Low Level Design (diagram aktywności)
+## Konfiguracja (env vars)
 
-```mermaid
-flowchart TD
-    A(["PaymentRequested"]) --> B{"idempotency_key przetworzony?"}
-    B -- tak --> C["zwróć poprzedni wynik"] --> Z(["ack"])
-    B -- nie --> D["czekaj PAYMENT_LATENCY_MS"]
-    D --> E{"odrzucić? (failure rate lub kwota x.66)"}
-    E -- nie --> F["(tx) payment COMPLETED + PaymentCompleted -> outbox"]
-    E -- tak --> G["(tx) payment FAILED + PaymentFailed -> outbox"]
-    F --> P["publisher emituje wynik"]
-    G --> P
-    P --> Z
+| Zmienna | Domyślna | Opis |
+|---|---|---|
+| `SPRING_DATASOURCE_URL` | — | JDBC URL do PostgreSQL |
+| `SPRING_KAFKA_BOOTSTRAP_SERVERS` | — | Adres brokera Kafka |
+| `SPRING_KAFKA_CONSUMER_GROUP_ID` | `shop-payment` | Kafka consumer group |
+| `PAYMENT_FAILURE_RATE` | `0.15` | Odsetek losowych odrzuceń (0.0–1.0) |
+| `PAYMENT_LATENCY_MS` | `200` | Sztuczne opóźnienie symulujące PSP (ms) |
+
+## Build & run
+
+```bash
+# testy (Cucumber BDD + Testcontainers — nie wymaga zewnętrznych usług)
+./gradlew test
+
+# jar
+./gradlew bootJar
+
+# obraz Docker
+docker build -t shop-payment .
 ```
+
+Aplikacja nasłuchuje na porcie **8080**. Health check: `GET /actuator/health`.
+
+## CI
+
+Każdy PR uruchamia preprod gate (`ai-bot-playground/shop-acceptance-tests`): buduje obraz, stawia usługę na klastrze `kind-preprod` i odpala testy cross-service. Wymagany zielony status `preprod-gate / gate` przed mergem.
